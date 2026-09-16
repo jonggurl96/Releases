@@ -5,6 +5,7 @@
 # minor:로 시작하면 MINOR를 1 증가시키고 PATCH를 0으로 초기화하며, patch:로 시작하면 PATCH만 1 증가시킵니다.
 # 예: v1.2.3 → major:이면 v2.0.0, minor:이면 v1.3.0, patch:이면 v1.2.4
 # 최초 릴리스 이후에는 그 외 접두사나 접두사가 없는 제목을 버전업 없이 정상 종료합니다.
+# init:는 버전이 없는 기존 프로젝트를 v1.0.0으로 초기화합니다. 기존 정식 버전은 유지합니다.
 # 정식 버전 태그가 없는 최초 실행은 접두사와 관계없이 v1.0.0을 생성합니다.
 # 최초 push는 정식 버전 태그가 없는 상태로 판별합니다. 기존 저장소에 도입해도 같은 규칙입니다.
 # package.json이나 Gradle의 버전 값은 수정하지 않으며 태그와 GitHub Release를 생성합니다.
@@ -106,20 +107,29 @@ jobs:
             latest_tag=$(git tag --list 'v*' \
               | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
               | sort -V | tail -n 1 || true)
-            # 정식 버전 태그가 없으면 첫 릴리스입니다. 커밋 접두사를 검사하지 않습니다.
-            # 첫 push가 major:, minor:, patch:, init: 또는 일반 메시지여도 v1.0.0입니다.
-            if [[ -z "$latest_tag" ]]; then
+            # 이번 push의 마지막 커밋(HEAD)의 제목을 읽습니다. 본문은 판별 대상이 아닙니다.
+            # 여러 커밋을 push해도 마지막 커밋의 제목만 사용합니다.
+            # PR을 merge commit 방식으로 병합했다면 병합 커밋 제목이 판별 기준입니다.
+            # 메시지를 GitHub 표현식으로 셸 코드에 직접 삽입하지 않고 Git 출력으로 읽어
+            # 메시지에 포함된 따옴표나 셸 명령 구문이 코드로 실행되지 않도록 합니다.
+            commit_subject=$(git log -1 --format=%s HEAD)
+
+            # init:는 기존 프로젝트에 최초 정식 버전을 부여하는 명시적 초기화 접두사입니다.
+            # 이미 정식 태그가 있으면 버전을 되돌리거나 태그를 덮어쓰지 않습니다.
+            if [[ "$commit_subject" == init:* ]]; then
+              if [[ -n "$latest_tag" ]]; then
+                echo "Initialization skipped: version already exists ($latest_tag)." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              next_tag="v1.0.0"
+            # 최초 자동 초기화도 유지합니다. 태그가 없으면 다른 제목도 v1.0.0입니다.
+            elif [[ -z "$latest_tag" ]]; then
               next_tag="v1.0.0"
             else
               # ${latest_tag#v}로 앞의 v를 제거하고 IFS를 점으로 지정해 세 숫자를 분리합니다.
               # 예: v1.2.3 → major=1, minor=2, patch=3
               IFS='.' read -r major minor patch <<< "${latest_tag#v}"
-              # 이번 push의 마지막 커밋(HEAD)의 제목을 읽습니다. 본문은 판별 대상이 아닙니다.
-              # 여러 커밋을 push해도 마지막 커밋의 제목만 사용합니다.
-              # PR을 merge commit 방식으로 병합했다면 병합 커밋 제목이 판별 기준입니다.
-              # 메시지를 GitHub 표현식으로 셸 코드에 직접 삽입하지 않고 Git 출력으로 읽어
-              # 메시지에 포함된 따옴표나 셸 명령 구문이 코드로 실행되지 않도록 합니다.
-              commit_subject=$(git log -1 --format=%s HEAD)
+
 
               # 대소문자를 구분하며 제목 맨 앞의 major:, minor:, patch: 접두사만 인정합니다.
               # 콜론 뒤의 공백 유무와 관계없이 접두사가 일치하면 해당 버전을 증가시킵니다.
