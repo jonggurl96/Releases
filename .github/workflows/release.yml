@@ -4,9 +4,10 @@
 # push 대상의 마지막 커밋 제목이 major:로 시작하면 MAJOR를 1 증가시키고 MINOR/PATCH를 0으로 초기화합니다.
 # minor:로 시작하면 MINOR를 1 증가시키고 PATCH를 0으로 초기화하며, patch:로 시작하면 PATCH만 1 증가시킵니다.
 # 예: v1.2.3 → major:이면 v2.0.0, minor:이면 v1.3.0, patch:이면 v1.2.4
-# 그 외 접두사나 접두사가 없는 제목은 버전을 올리지 않고 태그 생성 없이 정상 종료합니다.
-# 기존 태그가 없으면 v1.0.0 기준으로 major:는 v2.0.0, minor:는 v1.1.0, patch:는 v1.0.1을 생성합니다.
-# package.json이나 Gradle의 버전 값은 수정하지 않으며 GitHub Release도 생성하지 않습니다.
+# 최초 릴리스 이후에는 그 외 접두사나 접두사가 없는 제목을 버전업 없이 정상 종료합니다.
+# 정식 버전 태그가 없는 최초 실행은 접두사와 관계없이 v1.0.0을 생성합니다.
+# 최초 push는 정식 버전 태그가 없는 상태로 판별합니다. 기존 저장소에 도입해도 같은 규칙입니다.
+# package.json이나 Gradle의 버전 값은 수정하지 않으며 태그와 GitHub Release를 생성합니다.
 # 아래 이름은 GitHub 저장소의 Actions 화면에 표시됩니다.
 name: Auto Version
 
@@ -21,7 +22,7 @@ on:
       - main
 
 # GitHub가 실행마다 제공하는 GITHUB_TOKEN에 저장소 콘텐츠 쓰기 권한을 부여합니다.
-# 새 Git 태그를 원격 저장소에 push할 때 필요하며 별도의 PAT Secret은 사용하지 않습니다.
+# 새 Git 태그 push와 GitHub Release 게시에 필요하며 별도의 PAT Secret은 사용하지 않습니다.
 # 명시하지 않은 권한은 none으로 설정되어 다른 종류의 쓰기 권한을 부여하지 않습니다.
 # 저장소/조직의 정책 및 태그 생성 제한 규칙이 있으면 push가 거부될 수 있습니다.
 permissions:
@@ -39,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 버전 태그를 계산하고 원격 저장소로 push하는 단일 작업입니다.
+  # 버전 태그를 계산하고 원격 저장소에 push한 뒤 GitHub Release를 게시하는 단일 작업입니다.
   version:
     # 브랜치 삭제로 발생한 push 이벤트에서는 버전 생성 작업을 실행하지 않습니다.
     if: github.event.deleted == false
@@ -60,9 +61,13 @@ jobs:
           # checkout이 기본적으로 구성하는 GITHUB_TOKEN 인증은 뒤의 git push에도 사용됩니다.
           ref: ${{ github.sha }}
 
-      - name: Increment version by commit prefix and push tag
+      - name: Increment version and publish GitHub Release
         # Ubuntu 환경에서 Bash 문법과 명령어를 사용합니다.
         shell: bash
+        # GitHub CLI 인증에 기본 토큰을 사용합니다. Release 생성에도 contents: write가 필요합니다.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # -e: 명령이 실패하면 스크립트를 종료합니다. 조건문 등 Bash의 예외 문맥은 제외됩니다.
           # -u: 정의하지 않은 변수를 사용하면 오류로 처리합니다.
@@ -90,61 +95,82 @@ jobs:
             # -n은 문자열이 비어 있지 않은지 확인합니다.
             # GITHUB_STEP_SUMMARY에 기록한 내용은 GitHub Actions 실행 요약에 표시됩니다.
             echo "Commit already versioned: $existing_tag" >> "$GITHUB_STEP_SUMMARY"
-            # 이미 버전이 있는 상태는 실패가 아니므로 정상 종료합니다.
-            exit 0
+            # 태그 push 후 Release 생성만 실패했던 실행을 복구할 수 있도록 계속 진행합니다.
+            next_tag="$existing_tag"
+          else
+
+            # 전체 태그 중 위와 같은 정식 버전 형식에 맞는 태그를 조회합니다.
+            # 브랜치나 현재 커밋의 조상으로 범위를 제한하지 않고 저장소 전체 태그를 기준으로 합니다.
+            # 가장 최근에 생성된 태그가 아니라 숫자상 가장 큰 버전의 태그를 선택합니다.
+            # 예를 들어 v1.9.9와 v1.10.0이 있으면 v1.10.0을 기준으로 증가시킵니다.
+            latest_tag=$(git tag --list 'v*' \
+              | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+              | sort -V | tail -n 1 || true)
+            # 정식 버전 태그가 없으면 첫 릴리스입니다. 커밋 접두사를 검사하지 않습니다.
+            # 첫 push가 major:, minor:, patch:, init: 또는 일반 메시지여도 v1.0.0입니다.
+            if [[ -z "$latest_tag" ]]; then
+              next_tag="v1.0.0"
+            else
+              # ${latest_tag#v}로 앞의 v를 제거하고 IFS를 점으로 지정해 세 숫자를 분리합니다.
+              # 예: v1.2.3 → major=1, minor=2, patch=3
+              IFS='.' read -r major minor patch <<< "${latest_tag#v}"
+              # 이번 push의 마지막 커밋(HEAD)의 제목을 읽습니다. 본문은 판별 대상이 아닙니다.
+              # 여러 커밋을 push해도 마지막 커밋의 제목만 사용합니다.
+              # PR을 merge commit 방식으로 병합했다면 병합 커밋 제목이 판별 기준입니다.
+              # 메시지를 GitHub 표현식으로 셸 코드에 직접 삽입하지 않고 Git 출력으로 읽어
+              # 메시지에 포함된 따옴표나 셸 명령 구문이 코드로 실행되지 않도록 합니다.
+              commit_subject=$(git log -1 --format=%s HEAD)
+
+              # 대소문자를 구분하며 제목 맨 앞의 major:, minor:, patch: 접두사만 인정합니다.
+              # 콜론 뒤의 공백 유무와 관계없이 접두사가 일치하면 해당 버전을 증가시킵니다.
+              # 예: major: API 변경 → MAJOR 증가, feat: major: 설명 또는 Major: 변경 → 버전업 없음
+              case "$commit_subject" in
+                major:*)
+                  # MAJOR 증가 시 하위 버전인 MINOR와 PATCH를 모두 0으로 초기화합니다.
+                  next_tag="v$((major + 1)).0.0"
+                  ;;
+                minor:*)
+                  # MAJOR는 유지하고 MINOR를 증가시키며 PATCH를 0으로 초기화합니다.
+                  next_tag="v${major}.$((minor + 1)).0"
+                  ;;
+                patch:*)
+                  # MAJOR/MINOR는 유지하고 PATCH만 증가시킵니다. 9 다음은 10입니다.
+                  next_tag="v${major}.${minor}.$((patch + 1))"
+                  ;;
+                *)
+                  # 지원하지 않는 접두사 또는 접두사 없는 커밋은 태그 생성과 push를 건너뜁니다.
+                  # 의도적인 생략이므로 실패 처리하지 않고 실행 요약을 기록한 뒤 정상 종료합니다.
+                  echo "Version unchanged: no major:, minor:, or patch: prefix." >> "$GITHUB_STEP_SUMMARY"
+                  exit 0
+                  ;;
+              esac
+            fi
+
+            # push 이벤트의 대상 커밋인 HEAD에 로컬 경량 태그를 생성합니다.
+            # 별도 태그 메시지나 태그 작성자 정보를 기록하는 annotated 태그는 아닙니다.
+            git tag "$next_tag" HEAD
+            # 이번에 생성한 태그 하나만 원격 저장소로 전송합니다.
+            # 브랜치 커밋은 추가하지 않으며 기존 원격 태그를 강제로 덮어쓰지도 않습니다.
+            # 외부에서 동일 태그를 먼저 생성했다면 push가 실패할 수 있으며 자동 재시도는 없습니다.
+            # 기본 GITHUB_TOKEN으로 발생시킨 태그 push는 일반적인 후속 push 워크플로를 촉발하지 않습니다.
+            git push origin "refs/tags/$next_tag"
+            # push까지 성공한 경우에만 이전 버전과 새 버전을 실행 요약에 기록합니다.
+            echo "Version: $latest_tag → $next_tag" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # 전체 태그 중 위와 같은 정식 버전 형식에 맞는 태그를 조회합니다.
-          # 브랜치나 현재 커밋의 조상으로 범위를 제한하지 않고 저장소 전체 태그를 기준으로 합니다.
-          # 가장 최근에 생성된 태그가 아니라 숫자상 가장 큰 버전의 태그를 선택합니다.
-          # 예를 들어 v1.9.9와 v1.10.0이 있으면 v1.10.0을 기준으로 증가시킵니다.
-          latest_tag=$(git tag --list 'v*' \
-            | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
-            | sort -V | tail -n 1 || true)
-          # 적합한 태그가 없으면 기준값을 v1.0.0으로 설정합니다.
-          # 이 기준 태그 자체는 생성하지 않으며 지원하는 접두사에 따라 v2.0.0, v1.1.0, v1.0.1이 첫 태그가 됩니다.
-          latest_tag=${latest_tag:-v1.0.0}
-          # ${latest_tag#v}로 앞의 v를 제거하고 IFS를 점으로 지정해 세 숫자를 분리합니다.
-          # 예: v1.2.3 → major=1, minor=2, patch=3
-          IFS='.' read -r major minor patch <<< "${latest_tag#v}"
-          # 이번 push의 마지막 커밋(HEAD)의 제목을 읽습니다. 본문은 판별 대상이 아닙니다.
-          # 여러 커밋을 push해도 마지막 커밋의 제목만 사용합니다.
-          # PR을 merge commit 방식으로 병합했다면 병합 커밋 제목이 판별 기준입니다.
-          # 메시지를 GitHub 표현식으로 셸 코드에 직접 삽입하지 않고 Git 출력으로 읽어
-          # 메시지에 포함된 따옴표나 셸 명령 구문이 코드로 실행되지 않도록 합니다.
-          commit_subject=$(git log -1 --format=%s HEAD)
-
-          # 대소문자를 구분하며 제목 맨 앞의 major:, minor:, patch: 접두사만 인정합니다.
-          # 콜론 뒤의 공백 유무와 관계없이 접두사가 일치하면 해당 버전을 증가시킵니다.
-          # 예: major: API 변경 → MAJOR 증가, feat: major: 설명 또는 Major: 변경 → 버전업 없음
-          case "$commit_subject" in
-            major:*)
-              # MAJOR 증가 시 하위 버전인 MINOR와 PATCH를 모두 0으로 초기화합니다.
-              next_tag="v$((major + 1)).0.0"
-              ;;
-            minor:*)
-              # MAJOR는 유지하고 MINOR를 증가시키며 PATCH를 0으로 초기화합니다.
-              next_tag="v${major}.$((minor + 1)).0"
-              ;;
-            patch:*)
-              # MAJOR/MINOR는 유지하고 PATCH만 증가시킵니다. 9 다음은 10입니다.
-              next_tag="v${major}.${minor}.$((patch + 1))"
-              ;;
-            *)
-              # 지원하지 않는 접두사 또는 접두사 없는 커밋은 태그 생성과 push를 건너뜁니다.
-              # 의도적인 생략이므로 실패 처리하지 않고 실행 요약을 기록한 뒤 정상 종료합니다.
-              echo "Version unchanged: no major:, minor:, or patch: prefix." >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-              ;;
-          esac
-
-          # push 이벤트의 대상 커밋인 HEAD에 로컬 경량 태그를 생성합니다.
-          # 별도 태그 메시지나 태그 작성자 정보를 기록하는 annotated 태그는 아닙니다.
-          git tag "$next_tag" HEAD
-          # 이번에 생성한 태그 하나만 원격 저장소로 전송합니다.
-          # 브랜치 커밋은 추가하지 않으며 기존 원격 태그를 강제로 덮어쓰지도 않습니다.
-          # 외부에서 동일 태그를 먼저 생성했다면 push가 실패할 수 있으며 자동 재시도는 없습니다.
-          # 기본 GITHUB_TOKEN으로 발생시킨 태그 push는 일반적인 후속 push 워크플로를 촉발하지 않습니다.
-          git push origin "refs/tags/$next_tag"
-          # push까지 성공한 경우에만 이전 버전과 새 버전을 실행 요약에 기록합니다.
-          echo "Version: $latest_tag → $next_tag" >> "$GITHUB_STEP_SUMMARY"
+          # 모든 페이지를 조회하여 동일 태그의 Release가 있는지 확인합니다.
+          # API 인증/네트워크 오류는 set -e로 실패 처리하며 Release가 없는 것으로 오인하지 않습니다.
+          # next_tag는 숫자 버전 형식으로 검증된 태그이므로 아래 jq 조건에 안전하게 사용할 수 있습니다.
+          release_url=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$next_tag\") | .html_url")
+          if [[ -n "$release_url" ]]; then
+            # 기존 Release의 제목이나 본문은 덮어쓰지 않습니다.
+            echo "Release already exists: $release_url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # 원격 태그가 존재하는 경우에만 생성하여 잘못된 커밋의 태그 자동 생성을 방지합니다.
+            # 제목은 버전 태그, 본문은 GitHub가 생성한 릴리스 노트입니다.
+            # draft/prerelease 옵션을 사용하지 않으므로 정식 Release로 즉시 게시됩니다.
+            release_url=$(gh release create "$next_tag" \
+              --verify-tag --title "$next_tag" --generate-notes)
+            echo "Release published: $release_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
