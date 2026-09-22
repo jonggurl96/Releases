@@ -1,0 +1,215 @@
+name: Version Bump & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_type:
+        description: Project type
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - gradle
+          - maven
+          - node
+          - python
+
+      bump:
+        description: Version bump
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------
+      # 2. 프로젝트 종류 확인
+      # ---------------------------------------------------------
+      - name: Detect project type
+        id: project
+        env:
+          TYPE: ${{ inputs.project_type }}
+        run: bash .github/workflows/utils/bash/detectProjType.sh
+
+      # ---------------------------------------------------------
+      # 3. Maven일 경우 Java 설정
+      # ---------------------------------------------------------
+      - name: Setup Java
+        if: steps.project.outputs.type == 'maven'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # ---------------------------------------------------------
+      # 4. Node일 경우 Node 설정
+      # ---------------------------------------------------------
+      - name: Setup Node
+        if: steps.project.outputs.type == 'node'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      # ---------------------------------------------------------
+      # 5. 현재 버전 읽기 + 다음 버전 계산
+      # ---------------------------------------------------------
+      - name: Calculate next version
+        id: version
+        env:
+          PROJECT_TYPE: ${{ steps.project.outputs.type }}
+          BUMP_TYPE: ${{ inputs.bump }}
+        run: python3 .github/workflows/utils/python/pyplVersionUp.py
+
+      # ---------------------------------------------------------
+      # 6. 이미 존재하는 태그인지 확인
+      # ---------------------------------------------------------
+      - name: Check tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git show-ref \
+              --tags \
+              --verify \
+              --quiet \
+              "refs/tags/$TAG"; then
+
+            echo "이미 존재하는 태그입니다: $TAG"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------
+      # 7-1. Gradle build.gradle 수정
+      # ---------------------------------------------------------
+      - name: Update build.gradle
+        if: steps.project.outputs.type == 'gradle'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: python3 .github/workflows/utils/python/versionUpGradle.py
+
+      # ---------------------------------------------------------
+      # 7-2. Maven pom.xml 수정
+      # ---------------------------------------------------------
+      - name: Update pom.xml
+        if: steps.project.outputs.type == 'maven'
+        shell: bash
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          if [ -x "./mvnw" ]; then
+            MVN="./mvnw"
+          else
+            MVN="mvn"
+          fi
+
+          $MVN \
+            -B \
+            org.codehaus.mojo:versions-maven-plugin:2.19.1:set \
+            -DnewVersion="$NEW_VERSION" \
+            -DgenerateBackupPoms=false
+
+      # ---------------------------------------------------------
+      # 7-3. Node package.json 수정
+      # ---------------------------------------------------------
+      - name: Update package.json
+        if: steps.project.outputs.type == 'node'
+        shell: bash
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          npm version \
+            "$NEW_VERSION" \
+            --no-git-tag-version \
+            --ignore-scripts
+
+      # ---------------------------------------------------------
+      # 7-4. Python pyproject.toml 수정
+      # ---------------------------------------------------------
+      - name: Update pyproject.toml
+        if: steps.project.outputs.type == 'python'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: python3 .github/workflows/utils/python/versionUpPyprojToml.py
+
+      # ---------------------------------------------------------
+      # 8. 변경 내용 확인
+      # ---------------------------------------------------------
+      - name: Show changes
+        run: |
+          git status --short
+          git diff
+
+      # ---------------------------------------------------------
+      # 9. Commit + Tag
+      # ---------------------------------------------------------
+      - name: Commit version bump
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "변경된 파일이 없습니다."
+            exit 1
+          fi
+
+          git commit \
+            -m "chore(release): $TAG"
+
+          git tag \
+            -a "$TAG" \
+            -m "Release $TAG"
+
+      # ---------------------------------------------------------
+      # 10. Commit + Tag Push
+      # ---------------------------------------------------------
+      - name: Push commit and tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "$TAG"
+
+      # ---------------------------------------------------------
+      # 11. GitHub Release 생성
+      # ---------------------------------------------------------
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            --title "$TAG"
