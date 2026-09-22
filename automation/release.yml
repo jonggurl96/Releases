@@ -14,6 +14,7 @@ on:
           - maven
           - node
           - python
+          - flutter
 
       bump:
         description: Version bump
@@ -154,6 +155,15 @@ jobs:
         env:
           NEW_VERSION: ${{ steps.version.outputs.new }}
         run: python3 .github/workflows/utils/python/versionUpPyprojToml.py
+
+      # ---------------------------------------------------------
+      # 7-5. Flutter pubspec.yaml 수정
+      # ---------------------------------------------------------
+      - name: Update pubspec.yaml
+        if: steps.project.outputs.type == 'flutter'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: python3 .github/workflows/utils/python/versionUpPubspecYaml.py
 
       # ---------------------------------------------------------
       # 8. 변경 내용 확인

@@ -5,6 +5,7 @@ if [ "$TYPE" = "auto" ]; then
   [ -f "pom.xml" ] && FOUND+=("maven")
   [ -f "package.json" ] && FOUND+=("node")
   [ -f "pyproject.toml" ] && FOUND+=("python")
+  [ -f "pubspec.yaml" ] && FOUND+=("flutter")
 
   if [ "${#FOUND[@]}" -eq 0 ]; then
     echo "지원하는 버전 파일을 찾지 못했습니다."
@@ -33,6 +34,9 @@ case "$TYPE" in
     ;;
   python)
     FILE="pyproject.toml"
+    ;;
+  flutter)
+    FILE="pubspec.yaml"
     ;;
   *)
     echo "지원하지 않는 project_type: $TYPE"

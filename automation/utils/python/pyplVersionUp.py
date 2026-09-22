@@ -82,11 +82,33 @@ def get_python_version():
     )
 
 
+def get_flutter_version():
+    with open("pubspec.yaml", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    versions = []
+    for line in lines:
+        if line.startswith("version:"):
+            match = re.fullmatch(
+                r"""version:[ \t]*(['"]?)(\d+\.\d+\.\d+(?:\+\d+)?)\1[ \t]*(?:#.*)?\r?\n?""",
+                line,
+            )
+            if not match:
+                raise RuntimeError("pubspec.yaml의 version 형식이 올바르지 않습니다.")
+            versions.append(match.group(2))
+
+    if len(versions) != 1:
+        raise RuntimeError("pubspec.yaml에 최상위 version이 정확히 하나 있어야 합니다.")
+
+    return versions[0]
+
+
 getters = {
     "gradle": get_gradle_version,
     "maven": get_maven_version,
     "node": get_node_version,
     "python": get_python_version,
+    "flutter": get_flutter_version,
 }
 
 current = getters[project_type]()
